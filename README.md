@@ -21,10 +21,10 @@ I trust it because I wrote it, but if you don't feel free to read the script
 source code.
 
 ```shell
-curl -s https://raw.githubusercontent.com/leonbreedt/bootstrap/main/bin/setup | sh -s -- URL
+curl -s https://raw.githubusercontent.com/leonbreedt/bootstrap/main/bin/bootstrap | sh -s -- URL
 ```
 
-`URL` should be a URL or path to your `bootstrap.cfg` file.
+`URL` should be a URL or path to your syscfg configuration file.
 
 ## How it works
 
