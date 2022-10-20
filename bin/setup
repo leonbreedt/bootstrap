@@ -1,0 +1,224 @@
+#!/bin/sh
+# shellcheck shell=bash disable=SC2064
+
+set -eu
+
+GITHUB_ORG=leonbreedt
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
+SUDO_ASKPASS_DIR="$(mktemp -d)"
+SUDO_ASKPASS="$(mktemp "$SUDO_ASKPASS_DIR"/sudo-askpass-wrapper-XXXXXXXX)"
+INSTALL_BIN_DIR=/usr/local/bin
+
+usage() {
+    cat 1>&2 <<EOF
+Usage: setup URL
+
+Downloads syscfg and hf, and performs system setup and configuration.
+URL should be a URL or path to your bootstrap.cfg file.
+EOF
+}
+
+cleanup() {
+    local _sudo_setup _file1 _file2
+
+    _sudo_setup="${1:-}"
+
+    if [[ $_sudo_setup == 1 ]]; then
+        sudo --askpass rm -rf "$SUDO_ASKPASS_DIR"
+        sudo --reset-timestamp
+    fi
+
+    _file1="${2:-}"
+    if [ -n "$_file1" ] && [ -e "$_file1" ]; then
+        msg "removing $_file1"
+        rm -f "$_file1"
+    fi
+    _file2="${3:-}"
+    if [ -n "$_file2" ] && [ -e "$_file2" ]; then
+        msg "removing $_file2"
+        rm -f "$_file2"
+    fi
+}
+
+msg() {
+    printf 'setup: %s\n' "$1"
+}
+
+die() {
+    msg "$1" >&2
+    exit 1
+}
+
+check_cmd() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+ensure_cmd() {
+    if ! "$@"; then die "command failed: $*"; fi
+}
+
+require_cmd() {
+    if ! check_cmd "$1"; then
+        die "command '$1' not found, aborting"
+    fi
+}
+
+detect_architecture() {
+    local _os _cpu
+
+    _os="$(uname -s)"
+    _cpu="$(uname -m)"
+
+    if [ "$_os" = Darwin ] && [ "$_cpu" = i386 ]; then
+        if sysctl hw.optional.x86_64 | grep -q ': 1'; then
+            _cpu=x86_64
+        fi
+    fi
+
+    if [ "$_os" != Darwin ]; then
+        die "only macOS is supported by this tool, detected: $_os"
+    fi
+
+    _os="apple-darwin"
+
+    case "$_cpu" in
+        aarch64 | arm64)
+            _cpu=aarch64
+            ;;
+        x86_64 | x86-64 | x64 | amd64)
+            _cpu=x86_64
+            ;;
+        *)
+            die "unsupported CPU type: $_cpu"
+    esac
+
+    _DETECTED_ARCH="${_cpu}-${_os}"
+}
+
+github_curl() {
+    local _auth_header_args
+    if [ -n "$GITHUB_TOKEN" ]; then
+        _auth_header_args=(-H "Authorization: token $GITHUB_TOKEN")
+    else
+        _auth_header_args=("")
+    fi
+    curl --silent "${_auth_header_args[@]}" "$@"
+}
+
+github_detect_latest_release_version() {
+    github_curl "https://api.github.com/repos/$1/releases/latest" |
+        grep '"tag_name":' |
+        sed -E 's/.*"([^"]+)".*/\1/'
+}
+
+github_get_release_asset_id() {
+    # can't use browser download URL, need to find ID of asset.
+    github_curl "https://api.github.com/repos/$_repo/releases/tags/$_version" |
+        grep -C3 "name.:.\+$1" |
+        grep -w id |
+        awk -F: '{ print $2 }' |
+        tr -cd '[:alnum:]'
+}
+
+download_latest_release() {
+    local _project _arch _repo _exe _version _asset_id _dl_url _temp_dir _exe_path
+
+    _project="$1"
+    _arch="$2"
+    _repo="$GITHUB_ORG/$_project"
+    _exe="${_project}-${_arch}"
+
+    _version="$(github_detect_latest_release_version "$_repo")"
+    if [ -z "$_version" ]; then
+        die "unable to determine latest version of $_project, if it is in a private repository, specify GITHUB_TOKEN environment variable."
+    fi
+
+    # can't use browser download URL, need to find ID of asset.
+    _asset_id="$(github_get_release_asset_id "$_exe")"
+    if [ -z "$_asset_id" ]; then
+        die "unable to determine release asset ID of $_project $_version"
+    fi
+
+    _dl_url=https://api.github.com/repos/$_repo/releases/assets/$_asset_id
+    _temp_dir="$(ensure_cmd mktemp -d)"
+    _exe_path="$_temp_dir/$_exe"
+
+    msg "downloading $_project $_version from $_dl_url to $_exe"
+    github_curl "$_dl_url" -H 'Accept: application/octet-stream' -L -o "$_exe_path"
+    ensure_cmd chmod +x "$_exe_path"
+
+    if [ ! -x "$_exe_path" ]; then
+        die "unable to make $_exe_path executable, aborting"
+    fi
+
+    _DOWNLOADED_FILE="$_exe_path"
+}
+
+sudo_askpass() {
+    sudo --askpass "$@"
+}
+
+setup_sudo() {
+    sudo --reset-timestamp
+    read -rsp "setup: user password for sudo (needed to install syscfg/hf): " SUDO_PASSWORD
+    echo
+    if ! sudo --validate --stdin 2>/dev/null <<<"$SUDO_PASSWORD"; then
+        die "invalid password"
+    fi
+    cat >"$SUDO_ASKPASS" <<EOF
+#!/bin/sh
+echo "$SUDO_PASSWORD"
+EOF
+    unset SUDO_PASSWORD
+    chmod 700 "$SUDO_ASKPASS"
+    export SUDO_PASSWORD SUDO_ASKPASS
+}
+
+main() {
+    local _arch _was_sudo_setup _config_url
+
+    require_cmd curl
+    require_cmd grep
+    require_cmd awk
+    require_cmd sed
+    require_cmd mktemp
+    require_cmd mv
+    require_cmd sudo
+
+    detect_architecture || return 1
+    _arch="$_DETECTED_ARCH"
+    msg "architecture detected as ${_arch}"
+
+    trap cleanup EXIT
+    _was_sudo_setup=0
+
+    if ! check_cmd syscfg; then
+        setup_sudo
+        _was_sudo_setup=1
+        download_latest_release syscfg $_arch
+        _syscfg="$_DOWNLOADED_FILE"
+        trap "cleanup $_was_sudo_setup $_syscfg" EXIT
+        sudo_askpass mv -f "$_syscfg" "$INSTALL_BIN_DIR/syscfg"
+    else
+        msg "using syscfg from PATH"
+    fi
+
+    if ! check_cmd hf; then
+        if [[ $_was_sudo_setup == 0 ]]; then
+            setup_sudo
+            _was_sudo_setup=1
+        fi
+        download_latest_release hf $_arch
+        _hf="$_DOWNLOADED_FILE"
+        trap "cleanup $_was_sudo_setup $_syscfg $_hf" EXIT
+        sudo_askpass mv -f "$_hf" "$INSTALL_BIN_DIR/hf"
+    else
+        msg "using hf from PATH"
+    fi
+
+    _config_url="${1:-}"
+
+    syscfg setup "$_config_url"
+}
+
+main "$@" || exit 1

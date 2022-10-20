@@ -13,6 +13,19 @@ to fully configured.
 
 - No manual actions required
 
+## How to run it
+
+Yes, piping scripts from a random user's GitHub repository into your shell :)
+
+I trust it because I wrote it, but if you don't feel free to read the script
+source code.
+
+```shell
+curl https://raw.githubusercontent.com/leonbreedt/bootstrap/main/bin/setup | sh -s -- URL
+```
+
+`URL` should be a URL or path to your `bootstrap.cfg` file.
+
 ## How it works
 
 The scripts detect your macOS version and architecture, and download
@@ -33,6 +46,7 @@ on your configuration file. This includes things like:
 `hf` is used to clone a Git repository that contains your dotfiles,
 and can also be used like [yadm](https://yadm.io) to manage them
 afterwards.
+
 
 ## Why static executables?
 
